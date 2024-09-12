@@ -12,7 +12,7 @@ public:
 		if (bluetoothEnabled == false) {
 			sprintf(toPrint, "Bluetooth is disabled!\nOverlay disabled!");
 		}
-		else sprintf(toPrint, "Choose device.");
+		else sprintf(toPrint, "Choose device.\n");
 		s32 total_out = 0;
 		SetSysBluetoothDevicesSettings devices[0x20] = {0};
 		setsysGetBluetoothDevicesSettings(&total_out, devices, 0x20);
@@ -66,7 +66,7 @@ public:
 							}
 							else sprintf(toPrint, "Something went wrong!\nResult: 0x%x", rc);
 						}
-						else sprintf(toPrint, "%s\nconnected! It may take\nfew seconds to redirect audio.", audio_devices[i].name2);
+						else sprintf(toPrint, "Requested system to connect\n%s!", audio_devices[i].name2);
 						btdrvExit();
 					}
 					if (keys & HidNpadButton_Y) {
@@ -80,7 +80,7 @@ public:
 							}
 							else sprintf(toPrint, "Something went wrong!\nResult: 0x%x", rc);
 						}
-						else snprintf(toPrint, sizeof(toPrint), "%s\ndisconnected! It may take\nfew seconds to redirect audio.", audio_devices[i].name2);
+						else snprintf(toPrint, sizeof(toPrint), "Requested system to disconnect\n%s!", audio_devices[i].name2);
 						btdrvExit();
 					}
 

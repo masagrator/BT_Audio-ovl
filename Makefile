@@ -38,7 +38,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #   NACP building is skipped as well.
 #---------------------------------------------------------------------------------
 APP_TITLE	:=	BT Audio
-APP_VERSION	:=	1.0.0
+APP_VERSION	:=	1.0.1
 
 TARGET		:=	BT_Audio-ovl
 BUILD		:=	build
