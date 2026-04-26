@@ -1,36 +1,146 @@
 #define TESLA_INIT_IMPL // If you have more than one file using the tesla header, only define this in the main one
 #include <tesla.hpp>    // The Tesla Header
 
+/// Authentication
+typedef enum {
+    NifmAuthentication_Invalid                          = 0, ///< Invalid
+    NifmAuthentication_Open                             = 1, ///< Open
+    NifmAuthentication_Shared                           = 2, ///< Shared
+    NifmAuthentication_Wpa                              = 3, ///< WPA
+    NifmAuthentication_WpaPsk                           = 4, ///< WPA-PSK
+    NifmAuthentication_Wpa2                             = 5, ///< WPA2
+    NifmAuthentication_Wpa2Psk                          = 6, ///< WPA2-PSK
+    NifmAuthentication_Unk7                             = 7, ///< Unknown
+} NifmAuthentication;
+
+/// Encryption
+typedef enum {
+    NifmEncryption_Invalid                              = 0, ///< Invalid
+    NifmEncryption_None                                 = 1, ///< No password
+    NifmEncryption_Wep                                  = 2, ///< WEP 
+    NifmEncryption_Tkip                                 = 3, ///< TKIP
+    NifmEncryption_Aes                                  = 4, ///< AES
+} NifmEncryption;
+
+typedef enum {
+    NifmNetworkProfileType_User                         = BIT(0), ///< Saved by user
+    NifmNetworkProfileType_SsidList                     = BIT(1), ///< Hardcoded list of Nintendo hotspots
+    NifmNetworkProfileType_Temporary                    = BIT(2), ///< Temporary
+} NifmNetworkProfileType;
+
+/// SfNetworkProfileBasicInfo. Converted from/to \ref NifmNetworkProfileBasicInfo.
+typedef struct {
+    Uuid uuid;                                           ///< Uuid
+    char network_name[0x40];                             ///< NUL-terminated Network Name string.
+    u8 profile_type;                                     ///< \ref NifmNetworkProfileType
+    u8 connection_type;                                  ///< \ref NifmInternetConnectionType
+    u8 ssid_len;                                         ///< SSID length.
+    char ssid[0x20];                                     ///< SSID string.
+    u8 authentication;                                   ///< \ref NifmAuthentication
+    u8 encryption;                                       ///< \ref NifmEncryption
+} NifmSfNetworkProfileBasicInfo;
+
+/// NetworkProfileBasicInfo. Converted from/to \ref NifmSfNetworkProfileBasicInfo.
+typedef struct {
+    Uuid uuid;                                           ///< Uuid
+    char network_name[0x40];                             ///< NUL-terminated Network Name string.
+    NifmNetworkProfileType profile_type;                 ///< \ref NifmNetworkProfileType
+    NifmInternetConnectionType connection_type;          ///< \ref NifmInternetConnectionType
+    u8 ssid_len;                                         ///< SSID length.
+    char ssid[0x20];                                     ///< SSID string.
+    u8 pad[3];                                           ///< Padding
+    NifmAuthentication authentication;                   ///< \ref NifmAuthentication
+    NifmEncryption encryption;                           ///< \ref NifmEncryption
+} NifmNetworkProfileBasicInfo;
+
+static void _nifmConvertSfToNetworkProfileBasicInfo(const NifmSfNetworkProfileBasicInfo *in, NifmNetworkProfileBasicInfo *out) {
+    memset(out, 0, sizeof(*out));
+
+    out->uuid = in->uuid;
+    memcpy(out->network_name, in->network_name, sizeof(in->network_name));
+    out->network_name[sizeof(out->network_name)-1] = 0;
+    out->profile_type = (NifmNetworkProfileType)in->profile_type;
+    out->connection_type = (NifmInternetConnectionType)in->connection_type;
+
+    out->ssid_len = in->ssid_len;
+    if (out->ssid_len > sizeof(out->ssid)) out->ssid_len = sizeof(out->ssid);
+    if (out->ssid_len) memcpy(out->ssid, in->ssid, out->ssid_len);
+    out->authentication = (NifmAuthentication)in->authentication;
+    out->encryption = (NifmEncryption)in->encryption;
+}
+
+Result nifmEnumerateNetworkProfiles(NifmNetworkProfileType type, NifmNetworkProfileBasicInfo* buffer, s32 max_entries, s32* total_entries) {
+    NifmSfNetworkProfileBasicInfo* tmp_ptr = (NifmSfNetworkProfileBasicInfo*)buffer;
+    u8 in = (u8)type;
+    serviceAssumeDomain(nifmGetServiceSession_GeneralService());
+    Result rc = serviceDispatchInOut(nifmGetServiceSession_GeneralService(), 7, in, *total_entries,
+        .buffer_attrs = { SfBufferAttr_HipcMapAlias | SfBufferAttr_Out},
+        .buffers = { { buffer, sizeof(tmp_ptr[0]) * max_entries } },
+    );
+    if (R_FAILED(rc)) return rc;
+    s32 returned_entries = *total_entries < max_entries ? *total_entries : max_entries;
+    for (s32 i = (returned_entries-1); i >= 0; i--) {
+        NifmSfNetworkProfileBasicInfo tmp;
+        memcpy(&tmp, &tmp_ptr[i], sizeof(tmp));
+        _nifmConvertSfToNetworkProfileBasicInfo(&tmp, &buffer[i]);
+    }
+    return rc;
+}
+
+Result nifmRequestSetNetworkProfileId(NifmRequest* r, Uuid uuid) {
+    if (!serviceIsActive(&r->s))
+        return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
+
+    serviceAssumeDomain(&r->s);
+    return serviceDispatchIn(&r->s, 9, uuid);
+}
+
+struct WiFiSpots {
+	Uuid uuid;
+	std::string name;
+};
+bool wifiEnabled = false;
+std::vector<WiFiSpots> wifi_devices;
 char toPrint[256] = "";
-bool bluetoothEnabled = false;
-std::vector<SetSysBluetoothDevicesSettings> audio_devices;
+NifmRequest _request;
+s32 last_index = -1;
+Result connectionRc = 0;
+bool requestOpen = true;
 
 class GuiTest : public tsl::Gui {
 public:
 	GuiTest(u8 arg1, u8 arg2, bool arg3) {
-		setsysGetBluetoothEnableFlag(&bluetoothEnabled);
-		if (bluetoothEnabled == false) {
-			sprintf(toPrint, "Bluetooth is disabled!\nOverlay disabled!");
-		}
-		else sprintf(toPrint, "Choose device.\n");
-		s32 total_out = 0;
-		SetSysBluetoothDevicesSettings devices[0x20] = {0};
-		setsysGetBluetoothDevicesSettings(&total_out, devices, 0x20);
-		if (R_SUCCEEDED(setsysGetBluetoothDevicesSettings(&total_out, devices, 0x20))) {
-			for (s32 i = 0; i < total_out; i++) {
-				union {
-					u8 u8_value[4];
-					u32 u32_value;
-				} value;
-				value.u8_value[2] = devices[i].class_of_device.class_of_device[0];
-				value.u8_value[1] = devices[i].class_of_device.class_of_device[1];
-				value.u8_value[0] = devices[i].class_of_device.class_of_device[2];
-
-				if(value.u32_value & BIT(21)) {
-					audio_devices.push_back(devices[i]);
-				}
+		setsysGetWirelessLanEnableFlag(&wifiEnabled);
+		if (wifiEnabled == true) {
+			NifmInternetConnectionType type;
+			u32 dummy;
+			NifmInternetConnectionStatus status;
+			Result rc = nifmGetInternetConnectionStatus(&type, &dummy, &status);
+			if (R_SUCCEEDED(rc) && type == NifmInternetConnectionType_Ethernet) {
+				wifiEnabled = false;
+				sprintf(toPrint, "Ethernet connection detected!\nOverlay disabled!");
+				return;
 			}
 		}
+		if (wifiEnabled == false) {
+			sprintf(toPrint, "Wi-Fi is disabled!\nOverlay disabled!");
+			return;
+		}
+		else {
+			NifmNetworkProfileData profile;
+			Result rc = nifmGetCurrentNetworkProfile(&profile);
+			if (R_FAILED(rc)) sprintf(toPrint, "Choose device.");
+			else sprintf(toPrint, "Connected to:\n%s\nChoose device.", profile.network_name[0] ? profile.network_name : std::string(profile.wireless_setting_data.ssid, profile.wireless_setting_data.ssid_len).c_str());
+		}
+		s32 total_out = 0;
+		Result rc = nifmEnumerateNetworkProfiles(NifmNetworkProfileType_User, nullptr, 0, &total_out);
+		if (R_FAILED(rc) || total_out == 0) return;
+		NifmNetworkProfileBasicInfo* basicInfo = new NifmNetworkProfileBasicInfo[total_out];
+		nifmEnumerateNetworkProfiles(NifmNetworkProfileType_User, basicInfo, total_out, &total_out);
+		for (s32 i = total_out-1; i >= 0; i--) {
+			if (basicInfo[i].connection_type == NifmInternetConnectionType_WiFi) wifi_devices.emplace_back(basicInfo[i].uuid, (basicInfo[i].network_name[0] ? basicInfo[i].network_name : std::string(basicInfo[i].ssid, basicInfo[i].ssid_len)));
+		}
+		delete[] basicInfo;
 	}
 
 	// Called when this Gui gets loaded to create the UI
@@ -38,9 +148,9 @@ public:
 	virtual tsl::elm::Element* createUI() override {
 		// A OverlayFrame is the base element every overlay consists of. This will draw the default Title and Subtitle.
 		// If you need more information in the header or want to change it's look, use a HeaderOverlayFrame.
-		auto frame = new tsl::elm::OverlayFrame("BT Audio", APP_VERSION);
-		if (bluetoothEnabled) {
-			frame -> changeButtons("\uE0E1 Back  \uE0E0 Connect  \uE0E3 Disconnect");
+		auto frame = new tsl::elm::OverlayFrame(APP_TITLE, APP_VERSION);
+		if (wifiEnabled) {
+			frame -> changeButtons("\uE0E1 Back  \uE0E0 Connect");
 		}
 		else frame -> changeButtons("\uE0E1  Back");
 
@@ -49,41 +159,29 @@ public:
 		
 		list->addItem(new tsl::elm::CustomDrawer([](tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 w, s32 h) {
 			renderer->drawString(toPrint, false, x, y+30, 20, renderer->a(0xFFFF));
-		}), 100);
+		}), 120);
 
-		if (bluetoothEnabled) {
-			for (size_t i = 0; i < audio_devices.size(); i++) {
-				auto *clickableListItem = new tsl::elm::ListItem(audio_devices[i].name2);
-				clickableListItem->setClickListener([i](u64 keys) { 
-					if (keys & HidNpadButton_A) {
-						tsl::hlp::doWithSmSession([]{
-							btdrvInitialize();
-						});
-						Result rc = btdrvOpenAudioConnection(audio_devices[i].addr);
-						if (R_FAILED(rc)) {
-							if (rc == 0x190A71) {
-								sprintf(toPrint, "Device is already connected!");
-							}
-							else sprintf(toPrint, "Something went wrong!\nResult: 0x%x", rc);
+		if (wifiEnabled) {
+			for (size_t i = 0; i < wifi_devices.size(); i++) {
+				auto *clickableListItem = new tsl::elm::ListItem(wifi_devices[i].name);
+				clickableListItem->setClickListener([i, this](u64 keys) { 
+					if (wifiEnabled && requestOpen && (keys & HidNpadButton_A)) {
+						if (connectionRc == UINT32_MAX) {
+							nifmRequestCancel(&_request);
 						}
-						else sprintf(toPrint, "Requested system to connect\n%s!", audio_devices[i].name2);
-						btdrvExit();
-					}
-					if (keys & HidNpadButton_Y) {
-						tsl::hlp::doWithSmSession([]{
-							btdrvInitialize();
-						});
-						Result rc = btdrvCloseAudioConnection(audio_devices[i].addr);
-						if (R_FAILED(rc)) {
-							if (rc == 0x190471) {
-								sprintf(toPrint, "Device is already disconnected!");
-							}
-							else sprintf(toPrint, "Something went wrong!\nResult: 0x%x", rc);
+						nifmRequestClose(&_request);
+						connectionRc = nifmCreateRequest(&_request, true);
+						if (R_SUCCEEDED(connectionRc)) connectionRc = nifmRequestSetNetworkProfileId(&_request, wifi_devices[i].uuid);
+						if (R_SUCCEEDED(connectionRc)) connectionRc = nifmRequestSubmit(&_request);
+						if (R_FAILED(connectionRc)) nifmRequestClose(&_request);
+						else connectionRc = UINT32_MAX;
+						last_index = i;
+						requestOpen = false;
+						for (size_t x = 0; x < i; x++) {
+							this->requestFocus(this->getFocusedElement()->getParent(), tsl::FocusDirection::Up, false);
 						}
-						else snprintf(toPrint, sizeof(toPrint), "Requested system to disconnect\n%s!", audio_devices[i].name2);
-						btdrvExit();
+						return true;
 					}
-
 					return false;
 				});
 
@@ -100,9 +198,61 @@ public:
 
 	// Called once every frame to update values
 	virtual void update() override {
-		setsysGetBluetoothEnableFlag(&bluetoothEnabled);
-		if (bluetoothEnabled == false) {
-			sprintf(toPrint, "Bluetooth is disabled!\nOverlay disabled!");
+		if (last_index > -1) {
+			if (connectionRc == UINT32_MAX) {
+				NifmRequestState tmp;
+				Result rc = nifmGetRequestState(&_request, &tmp);
+				if (R_FAILED(rc)) {
+					connectionRc = rc;
+					requestOpen = true;
+				}
+				if (tmp == NifmRequestState_OnHold) snprintf(toPrint, sizeof(toPrint), "Connecting to:\n%s...", wifi_devices[last_index].name.c_str());
+				else {
+					connectionRc = nifmGetResult(&_request);
+					requestOpen = true;
+				}
+			}
+			else if (R_SUCCEEDED(connectionRc)) snprintf(toPrint, sizeof(toPrint), "Successfully connected to:\n%s", wifi_devices[last_index].name.c_str());
+			else {
+				requestOpen = true;
+				#define RESULT_WIFI_OFF 0x8ae6e
+				#define RESULT_WIFI_NOT_FOUND 0x8986e
+				#define RESULT_WIFI_NOT_FOUND_DISCONNECTED 0xfa66e
+				if (connectionRc == RESULT_WIFI_OFF) {
+					sprintf(toPrint, "Error! Wi-Fi turned off!\nOverlay disabled!");
+					wifiEnabled = false;
+				}
+				else if (connectionRc == RESULT_WIFI_NOT_FOUND) {
+					snprintf(toPrint, sizeof(toPrint), "Couldn't connect to:\n%s\n\nLast connection was maintained.", wifi_devices[last_index].name.c_str());
+				}
+				else if (connectionRc == RESULT_WIFI_NOT_FOUND_DISCONNECTED) {
+					snprintf(toPrint, sizeof(toPrint), "Couldn't connect to:\n%s\n\nLast connection was not maintained!", wifi_devices[last_index].name.c_str());
+				}
+				else {
+					snprintf(toPrint, sizeof(toPrint), "Error while connecting to:\n%s\nError code: 0x%x", wifi_devices[last_index].name.c_str(), connectionRc);
+				}
+			}
+		}
+		if (wifiEnabled == true) {
+			setsysGetWirelessLanEnableFlag(&wifiEnabled);
+			NifmInternetConnectionType type;
+			u32 dummy;
+			NifmInternetConnectionStatus status;
+			Result rc = nifmGetInternetConnectionStatus(&type, &dummy, &status);
+			if (R_SUCCEEDED(rc) && type == NifmInternetConnectionType_Ethernet) {
+				wifiEnabled = false;
+			}
+		}
+		if (wifiEnabled == false) {
+			NifmInternetConnectionType type;
+			u32 dummy;
+			NifmInternetConnectionStatus status;
+			Result rc = nifmGetInternetConnectionStatus(&type, &dummy, &status);
+			if (R_SUCCEEDED(rc) && type == NifmInternetConnectionType_Ethernet) {
+				sprintf(toPrint, "Ethernet connection detected!\nOverlay disabled!");
+				return;
+			}
+			sprintf(toPrint, "Wi-Fi is disabled!\nOverlay disabled!");
 		}
 	}
 
@@ -115,7 +265,7 @@ public:
 class GuiTest2 : public tsl::Gui {
 public:
 	GuiTest2(u8 arg1, u8 arg2, bool arg3) {
-		sprintf(toPrint, "Bluetooth is disabled!\nEnable bluetooth in system settings.");
+		sprintf(toPrint, "Wi-Fi is disabled!\nEnable Wi-Fi in system settings.");
 	}
 
 	// Called when this Gui gets loaded to create the UI
@@ -123,7 +273,7 @@ public:
 	virtual tsl::elm::Element* createUI() override {
 		// A OverlayFrame is the base element every overlay consists of. This will draw the default Title and Subtitle.
 		// If you need more information in the header or want to change it's look, use a HeaderOverlayFrame.
-		auto frame = new tsl::elm::OverlayFrame("BT Audio", APP_VERSION);
+		auto frame = new tsl::elm::OverlayFrame(APP_TITLE, APP_VERSION);
 
 		frame -> changeButtons("\uE0E1  Back");
 
@@ -157,14 +307,19 @@ public:
 		tsl::hlp::doWithSmSession([]{
 			
 			setsysInitialize();
-			setsysGetBluetoothEnableFlag(&bluetoothEnabled);
+			nifmInitialize(NifmServiceType_User);
+			nifmCreateRequest(&_request, true);
+			setsysGetWirelessLanEnableFlag(&wifiEnabled);
 		});
 	
 	}  // Called at the start to initialize all services necessary for this Overlay
 	
 	virtual void exitServices() override {
+		nifmRequestCancel(&_request);
+		nifmRequestClose(&_request);
+		nifmExit();
 		setsysExit();
-		audio_devices.clear();
+		wifi_devices.clear();
 	}  // Callet at the end to clean up all services previously initialized
 
 	virtual void onShow() override {}    // Called before overlay wants to change from invisible to visible state
@@ -172,7 +327,7 @@ public:
 	virtual void onHide() override {}    // Called before overlay wants to change from visible to invisible state
 
 	virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {
-		if (bluetoothEnabled == false) {
+		if (wifiEnabled == false) {
 			return initially<GuiTest2>(1, 2, true);  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 		}
 		return initially<GuiTest>(1, 2, true);  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
